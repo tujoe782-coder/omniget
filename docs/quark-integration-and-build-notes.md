@@ -93,6 +93,15 @@ API 流程（share 頁）：
 
 **加速結論**：GitHub 上夸克工具（LinkSwift / netdisk-fast-download / QuarkPanTool）**都只解析直鏈、不破限速**；唯一有效的免費加速是**多連線分段**（因 Quark 為 per-connection 限速），本修法已內建（16 連線）。真正「不限速」只能靠夸克會員帳號。
 
+### A.9 列檔進度 + API timeout（robustness 改善）
+
+大檔分享（100+ 檔）遞迴列檔耗時長（每次 detail 呼叫間 300ms 節流 + 偶發 Quark 慢回應），原本「准备下载」期間無任何回饋，看起來像卡住。兩項改善：
+
+1. **列檔進度**：`list_share_recursive` 每處理完一層 `app.emit("quark-listing-progress", {files, folders})`；前端 `handleAction` 的 quark 分支在 listing 期間 `listen()` 此事件，preparing 卡片顯示「正在列出 N 個檔案…」（i18n `omnibox.quark.listing`），結束於 `finally` 解除監聽。
+2. **API timeout**：`QuarkDownloader` 的 reqwest client 只設 `connect_timeout(15s)`（**不可設 global request timeout** — 同一 client 也給 http_fetcher 用、會誤殺長時間的大檔下載）；token/detail/file-download 三個 JSON API 各自加**每請求** `.timeout(30s)`，避免某次 API hang 住讓整個列檔無限等。
+
+改動檔：`platforms/quark/mod.rs`（emit + client/connect_timeout + per-request timeout + `list_share_recursive` 加 `app` 參數）、`commands/quark.rs`（傳 `Some(&app)`）、`src/routes/+page.svelte`（listen + preparing 顯示）、9 語系 i18n。
+
 ---
 
 ## B. omniget 編譯 / 打包指南

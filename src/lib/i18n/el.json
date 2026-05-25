@@ -596,7 +596,8 @@
       "queued": "Queued {{count}} file(s) from \"{{title}}\"",
       "empty": "This share has no downloadable files",
       "not_logged_in": "Not logged in to Quark — open pan.quark.cn in your browser and log in first",
-      "list_failed": "Failed to read the Quark share (it may be expired or require a password)"
+      "list_failed": "Failed to read the Quark share (it may be expired or require a password)",
+      "listing": "Listing {{count}} files…"
     }
   },
   "about": {

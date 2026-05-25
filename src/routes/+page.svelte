@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { goto } from "$app/navigation";
   import { onMount } from "svelte";
@@ -80,6 +81,9 @@
 
   let url = $state("");
   let omniState = $state<OmniState>({ kind: "idle" });
+  // Live count while a Quark share is being recursively listed (large shares
+  // take a while; shows "listing N files…" so the prepare step isn't opaque).
+  let quarkListing = $state<{ files: number; folders: number } | null>(null);
   let debounceTimer = $state<ReturnType<typeof setTimeout> | null>(null);
   let downloadMode = $state<"auto" | "audio" | "mute">("auto");
   let selectedQuality = $state("best");
@@ -550,7 +554,12 @@
 
     // 夸克网盘：遞迴列出整個分享資料夾 → 每檔入列下載
     if (platform === "quark") {
+      quarkListing = { files: 0, folders: 0 };
       omniState = { kind: "preparing", platform };
+      const unlisten = await listen<{ files: number; folders: number }>(
+        "quark-listing-progress",
+        (e) => { quarkListing = e.payload; }
+      );
       try {
         const listing = await invoke<{
           title: string;
@@ -576,6 +585,9 @@
         else if (raw.startsWith("QuarkList|")) msg = $t("omnibox.quark.list_failed");
         else msg = raw || $t("omnibox.error");
         omniState = { kind: "error", message: msg, originalUrl: currentUrl, platform };
+      } finally {
+        unlisten();
+        quarkListing = null;
       }
       return;
     }
@@ -1019,7 +1031,13 @@
       <div class="feedback-card feedback-enter">
         <div class="card-row">
           <span class="feedback-spinner"></span>
-          <span class="card-text">{$t('omnibox.preparing')}</span>
+          <span class="card-text">
+            {#if quarkListing}
+              {$t('omnibox.quark.listing', { count: quarkListing.files })}
+            {:else}
+              {$t('omnibox.preparing')}
+            {/if}
+          </span>
         </div>
       </div>
 

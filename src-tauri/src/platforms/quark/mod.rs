@@ -33,6 +33,7 @@ use omniget_core::models::media::{
 use omniget_core::platforms::traits::PlatformDownloader;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +45,9 @@ const API: &str = "https://drive-pc.quark.cn/1/clouddrive";
 const REQUIRED_COOKIES: &[&str] = &["__pus", "__puus"];
 const MAX_DEPTH: usize = 30;
 const LIST_THROTTLE_MS: u64 = 300;
+/// Per-request timeout for the JSON API calls (token/detail/download link).
+/// Not applied to the file download itself (that can legitimately run long).
+const API_TIMEOUT_SECS: u64 = 30;
 
 /// One file resolved from a share, ready to enqueue/download.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +71,14 @@ pub struct QuarkShareListing {
     pub files: Vec<QuarkFile>,
 }
 
+/// Progress event emitted while recursively listing a share (large shares can
+/// take a while; this drives the "listing N files…" UI so it doesn't look hung).
+#[derive(Debug, Clone, Serialize)]
+pub struct QuarkListProgress {
+    pub files: usize,
+    pub folders: usize,
+}
+
 /// uuid → QuarkFile, shared between commands and the downloader instance.
 pub type QuarkPending = Arc<Mutex<HashMap<String, QuarkFile>>>;
 
@@ -77,10 +89,14 @@ pub struct QuarkDownloader {
 
 impl QuarkDownloader {
     pub fn new(pending: QuarkPending) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            pending,
-        }
+        // connect_timeout only — a global request timeout would also kill the
+        // (long) file download since the same client backs http_fetcher.
+        // Per-request timeouts are applied to the API calls instead (see below).
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
+        Self { client, pending }
     }
 
     pub fn pending(&self) -> QuarkPending {
@@ -126,6 +142,7 @@ impl QuarkDownloader {
             .post(&url)
             .headers(Self::headers(cookie))
             .json(&body)
+            .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
             .send()
             .await?
             .json()
@@ -170,6 +187,7 @@ impl QuarkDownloader {
                 .client
                 .get(&url)
                 .headers(Self::headers(cookie))
+                .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
                 .send()
                 .await?
                 .json()
@@ -209,12 +227,14 @@ impl QuarkDownloader {
         &self,
         share_url: &str,
         cookie: &str,
+        app: Option<&tauri::AppHandle>,
     ) -> Result<QuarkShareListing> {
         let pwd_id = Self::pwd_id_from_url(share_url)
             .ok_or_else(|| anyhow!("Could not extract share id from URL"))?;
         let (stoken, title) = self.get_stoken(&pwd_id, cookie).await?;
 
         let mut files: Vec<QuarkFile> = Vec::new();
+        let mut folders = 0usize;
         // (pdir_fid, rel_path, depth) — DFS via stack to avoid async recursion.
         // rel_path is the in-share folder path only (NOT prefixed with the share
         // title) so files land under <output_dir>/<sub-folders>/<name> without a
@@ -229,6 +249,7 @@ impl QuarkDownloader {
             let entries = self.list_dir(&pwd_id, &stoken, &pdir, cookie).await?;
             for e in entries {
                 if e.is_dir {
+                    folders += 1;
                     let child = if rel.is_empty() {
                         e.name.clone()
                     } else {
@@ -246,6 +267,15 @@ impl QuarkDownloader {
                         size: e.size,
                     });
                 }
+            }
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "quark-listing-progress",
+                    QuarkListProgress {
+                        files: files.len(),
+                        folders,
+                    },
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(LIST_THROTTLE_MS)).await;
         }
@@ -273,6 +303,7 @@ impl QuarkDownloader {
             .post(&url)
             .headers(Self::headers(cookie))
             .json(&body)
+            .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
             .send()
             .await?
             .json()

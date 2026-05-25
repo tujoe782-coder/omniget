@@ -21,6 +21,7 @@ const QUARK_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
 pub async fn quark_list_share(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     url: String,
 ) -> Result<QuarkShareListing, String> {
@@ -29,7 +30,7 @@ pub async fn quark_list_share(
         .map_err(|e| format!("QuarkCookie|{e}"))?;
     let downloader = QuarkDownloader::new(state.quark_pending.clone());
     downloader
-        .list_share_recursive(&url, &cookie)
+        .list_share_recursive(&url, &cookie, Some(&app))
         .await
         .map_err(|e| format!("QuarkList|{e}"))
 }

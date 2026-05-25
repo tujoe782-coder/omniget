@@ -596,7 +596,8 @@
       "queued": "已從「{{title}}」加入 {{count}} 個檔案到下載佇列",
       "empty": "這個分享沒有可下載的檔案",
       "not_logged_in": "尚未登入夸克 — 請先在瀏覽器開啟 pan.quark.cn 並登入",
-      "list_failed": "讀取夸克分享失敗（可能已失效或需要密碼）"
+      "list_failed": "讀取夸克分享失敗（可能已失效或需要密碼）",
+      "listing": "正在列出 {{count}} 個檔案…"
     }
   },
   "about": {

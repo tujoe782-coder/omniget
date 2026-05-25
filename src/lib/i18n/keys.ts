@@ -445,6 +445,7 @@ export type TranslationKeys =
   | 'omnibox.quark.download_all'
   | 'omnibox.quark.empty'
   | 'omnibox.quark.list_failed'
+  | 'omnibox.quark.listing'
   | 'omnibox.quark.not_logged_in'
   | 'omnibox.quark.note'
   | 'omnibox.quark.queued'
