@@ -113,6 +113,23 @@ impl QuarkDownloader {
         }
     }
 
+    /// Starting folder fid from the URL fragment. When the user is inside a
+    /// sub-folder the link looks like `…/s/<pwd_id>#/list/share/<fid>` — we honor
+    /// that so only the chosen sub-folder is downloaded (not the whole share).
+    /// Returns `"0"` (share root) when no valid 32-hex fid is in the fragment.
+    pub fn start_fid_from_url(share_url: &str) -> String {
+        url::Url::parse(share_url)
+            .ok()
+            .and_then(|u| u.fragment().map(|f| f.to_string()))
+            .and_then(|frag| {
+                frag.rsplit('/')
+                    .find(|s| !s.is_empty())
+                    .filter(|s| s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()))
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "0".to_string())
+    }
+
     /// Acquire the Quark login cookie from the user's browser.
     pub async fn acquire_cookie() -> Result<String> {
         tokio::task::spawn_blocking(|| {
@@ -239,7 +256,10 @@ impl QuarkDownloader {
         // rel_path is the in-share folder path only (NOT prefixed with the share
         // title) so files land under <output_dir>/<sub-folders>/<name> without a
         // redundant title layer.
-        let mut stack: Vec<(String, String, usize)> = vec![("0".to_string(), String::new(), 0)];
+        // Start at the sub-folder fid from the URL fragment when present, so
+        // pasting a deep link downloads only that folder instead of the whole share.
+        let start_fid = Self::start_fid_from_url(share_url);
+        let mut stack: Vec<(String, String, usize)> = vec![(start_fid, String::new(), 0)];
 
         while let Some((pdir, rel, depth)) = stack.pop() {
             if depth > MAX_DEPTH {
@@ -528,6 +548,27 @@ mod tests {
         assert_eq!(
             QuarkDownloader::pwd_id_from_url("https://pan.quark.cn/list").as_deref(),
             None
+        );
+    }
+
+    #[test]
+    fn start_fid_from_fragment() {
+        // deep link → sub-folder fid
+        assert_eq!(
+            QuarkDownloader::start_fid_from_url(
+                "https://pan.quark.cn/s/6959f1e185ac#/list/share/e4bba9a2039c4372aae534b2f053d965"
+            ),
+            "e4bba9a2039c4372aae534b2f053d965"
+        );
+        // no fragment → share root
+        assert_eq!(
+            QuarkDownloader::start_fid_from_url("https://pan.quark.cn/s/6959f1e185ac"),
+            "0"
+        );
+        // non-fid fragment → share root
+        assert_eq!(
+            QuarkDownloader::start_fid_from_url("https://pan.quark.cn/s/6959f1e185ac#/list/all"),
+            "0"
         );
     }
 

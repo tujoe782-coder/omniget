@@ -102,6 +102,12 @@ API 流程（share 頁）：
 
 改動檔：`platforms/quark/mod.rs`（emit + client/connect_timeout + per-request timeout + `list_share_recursive` 加 `app` 參數）、`commands/quark.rs`（傳 `Some(&app)`）、`src/routes/+page.svelte`（listen + preparing 顯示）、9 語系 i18n。
 
+### A.10 子資料夾下載（honor URL fragment）
+
+貼深層連結 `…/s/<pwd_id>#/list/share/<fid>`（使用者點進某子資料夾後的網址）時，原本忽略 fragment、永遠從根目錄列整個分享（大分享如 517GB/1796 檔會爆量）。修法：`start_fid_from_url()` 從 fragment 取最後一段 32-hex fid 當遞迴起點 `pdir_fid`（無有效 fid → `"0"` 全share）。`list_share_recursive` 從該 fid 起遞迴 → 只下載該子資料夾內容（rel_path 從空開始，內容直接落在 output_dir）。
+
+改動檔：`platforms/quark/mod.rs`（`start_fid_from_url` + 遞迴起點）。實測：`…#/list/share/e4bba9a2…` → 只列該夾的 1 個 .rar（82.4MB），非整個 share。
+
 ---
 
 ## B. omniget 編譯 / 打包指南
