@@ -57,9 +57,13 @@ pub struct QuarkFile {
     pub pwd_id: String,
     pub stoken: String,
     pub name: String,
-    /// Relative directory (share title + sub-folders), e.g. "4.30/软件".
+    /// Relative directory inside the share/folder, e.g. "软件".
     pub rel_path: String,
     pub size: u64,
+    /// true = file lives in the user's own drive (download API takes only fids,
+    /// no pwd_id/stoken); false = a shared file.
+    #[serde(default)]
+    pub own_drive: bool,
 }
 
 /// Result of listing an entire share for the UI summary card.
@@ -81,6 +85,13 @@ pub struct QuarkListProgress {
 
 /// uuid → QuarkFile, shared between commands and the downloader instance.
 pub type QuarkPending = Arc<Mutex<HashMap<String, QuarkFile>>>;
+
+/// What we're listing: a public share (needs pwd_id + stoken) or the user's own
+/// drive (authenticated by cookie, fids only).
+enum ListSource {
+    Share { pwd_id: String, stoken: String },
+    OwnDrive,
+}
 
 pub struct QuarkDownloader {
     client: reqwest::Client,
@@ -113,21 +124,36 @@ impl QuarkDownloader {
         }
     }
 
-    /// Starting folder fid from the URL fragment. When the user is inside a
-    /// sub-folder the link looks like `…/s/<pwd_id>#/list/share/<fid>` — we honor
-    /// that so only the chosen sub-folder is downloaded (not the whole share).
-    /// Returns `"0"` (share root) when no valid 32-hex fid is in the fragment.
-    pub fn start_fid_from_url(share_url: &str) -> String {
-        url::Url::parse(share_url)
+    /// Starting folder fid from the URL fragment. Honors a deep link so only the
+    /// chosen folder is downloaded (not the whole share / drive). Handles both:
+    ///   share sub-folder: `…/s/<pwd_id>#/list/share/<fid>`
+    ///   own drive folder: `…/list#/list/all/<fid>-<name>/<fid2>-<name2>`
+    /// Returns `"0"` (root) when no valid 32-hex fid is found.
+    pub fn start_fid_from_url(url: &str) -> String {
+        url::Url::parse(url)
             .ok()
             .and_then(|u| u.fragment().map(|f| f.to_string()))
             .and_then(|frag| {
-                frag.rsplit('/')
-                    .find(|s| !s.is_empty())
-                    .filter(|s| s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()))
-                    .map(|s| s.to_string())
+                frag.rsplit('/').find(|s| !s.is_empty()).map(|seg| {
+                    // own-drive segments are "<fid>-<name>"; share are bare "<fid>"
+                    seg.split('-').next().unwrap_or(seg).to_string()
+                })
             })
+            .filter(|c| c.len() == 32 && c.chars().all(|c| c.is_ascii_hexdigit()))
             .unwrap_or_else(|| "0".to_string())
+    }
+
+    /// Decoded folder name from the last fragment segment (own-drive links carry
+    /// `<fid>-<url-encoded-name>`); used as the listing title. None if absent.
+    fn folder_name_from_url(url: &str) -> Option<String> {
+        let frag = url::Url::parse(url).ok()?.fragment()?.to_string();
+        let seg = frag.rsplit('/').find(|s| !s.is_empty())?;
+        let name = seg.splitn(2, '-').nth(1)?;
+        Some(
+            urlencoding::decode(name)
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| name.to_string()),
+        )
     }
 
     /// Acquire the Quark login cookie from the user's browser.
@@ -239,26 +265,92 @@ impl QuarkDownloader {
         Ok(entries)
     }
 
-    /// Recursively list the entire share into a flat file list.
+    /// List one directory of the user's OWN drive (file/sort API, all pages).
+    async fn list_own_dir(&self, pdir_fid: &str, cookie: &str) -> Result<Vec<QuarkEntry>> {
+        let mut entries = Vec::new();
+        let mut page = 1usize;
+        loop {
+            let url = format!(
+                "{API}/file/sort?pr=ucpro&fr=pc&uc_param_str=&pdir_fid={pdir_fid}\
+                 &_page={page}&_size=50&_fetch_total=1&_fetch_sub_dirs=0\
+                 &_sort=file_type:asc,updated_at:desc"
+            );
+            let resp: serde_json::Value = self
+                .client
+                .get(&url)
+                .headers(Self::headers(cookie))
+                .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
+                .send()
+                .await?
+                .json()
+                .await
+                .context("parse file/sort response")?;
+
+            let code = resp.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            if code != 0 {
+                return Err(anyhow!("Quark drive list failed (code {code})"));
+            }
+            let list = resp
+                .pointer("/data/list")
+                .and_then(|l| l.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if list.is_empty() {
+                break;
+            }
+            for item in &list {
+                entries.push(QuarkEntry::from_json(item));
+            }
+            let total = resp
+                .pointer("/metadata/_total")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(entries.len() as u64);
+            if entries.len() as u64 >= total {
+                break;
+            }
+            page += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(LIST_THROTTLE_MS)).await;
+        }
+        Ok(entries)
+    }
+
+    /// Recursively list a share OR the user's own drive into a flat file list.
+    /// Dispatches by URL: `/s/<pwd_id>` → share API; otherwise (`/list#…`) →
+    /// own-drive API. Honors a deep-link folder fid as the recursion root.
     pub async fn list_share_recursive(
         &self,
-        share_url: &str,
+        url: &str,
         cookie: &str,
         app: Option<&tauri::AppHandle>,
     ) -> Result<QuarkShareListing> {
-        let pwd_id = Self::pwd_id_from_url(share_url)
-            .ok_or_else(|| anyhow!("Could not extract share id from URL"))?;
-        let (stoken, title) = self.get_stoken(&pwd_id, cookie).await?;
+        let start_fid = Self::start_fid_from_url(url);
+        match Self::pwd_id_from_url(url) {
+            Some(pwd_id) => {
+                let (stoken, title) = self.get_stoken(&pwd_id, cookie).await?;
+                self.list_recursive(ListSource::Share { pwd_id, stoken }, start_fid, title, cookie, app)
+                    .await
+            }
+            None => {
+                let title = Self::folder_name_from_url(url).unwrap_or_else(|| "Quark Drive".into());
+                self.list_recursive(ListSource::OwnDrive, start_fid, title, cookie, app)
+                    .await
+            }
+        }
+    }
 
+    /// Shared DFS used by both share and own-drive listing. rel_path holds only
+    /// the in-folder structure (no title prefix) so files land directly under the
+    /// chosen output dir.
+    async fn list_recursive(
+        &self,
+        source: ListSource,
+        start_fid: String,
+        title: String,
+        cookie: &str,
+        app: Option<&tauri::AppHandle>,
+    ) -> Result<QuarkShareListing> {
         let mut files: Vec<QuarkFile> = Vec::new();
         let mut folders = 0usize;
-        // (pdir_fid, rel_path, depth) — DFS via stack to avoid async recursion.
-        // rel_path is the in-share folder path only (NOT prefixed with the share
-        // title) so files land under <output_dir>/<sub-folders>/<name> without a
-        // redundant title layer.
-        // Start at the sub-folder fid from the URL fragment when present, so
-        // pasting a deep link downloads only that folder instead of the whole share.
-        let start_fid = Self::start_fid_from_url(share_url);
         let mut stack: Vec<(String, String, usize)> = vec![(start_fid, String::new(), 0)];
 
         while let Some((pdir, rel, depth)) = stack.pop() {
@@ -266,7 +358,12 @@ impl QuarkDownloader {
                 tracing::warn!("[quark] max depth reached at {rel}, skipping");
                 continue;
             }
-            let entries = self.list_dir(&pwd_id, &stoken, &pdir, cookie).await?;
+            let entries = match &source {
+                ListSource::Share { pwd_id, stoken } => {
+                    self.list_dir(pwd_id, stoken, &pdir, cookie).await?
+                }
+                ListSource::OwnDrive => self.list_own_dir(&pdir, cookie).await?,
+            };
             for e in entries {
                 if e.is_dir {
                     folders += 1;
@@ -277,14 +374,27 @@ impl QuarkDownloader {
                     };
                     stack.push((e.fid, child, depth + 1));
                 } else {
-                    files.push(QuarkFile {
-                        fid: e.fid,
-                        share_fid_token: e.share_fid_token,
-                        pwd_id: pwd_id.clone(),
-                        stoken: stoken.clone(),
-                        name: e.name,
-                        rel_path: rel.clone(),
-                        size: e.size,
+                    files.push(match &source {
+                        ListSource::Share { pwd_id, stoken } => QuarkFile {
+                            fid: e.fid,
+                            share_fid_token: e.share_fid_token,
+                            pwd_id: pwd_id.clone(),
+                            stoken: stoken.clone(),
+                            name: e.name,
+                            rel_path: rel.clone(),
+                            size: e.size,
+                            own_drive: false,
+                        },
+                        ListSource::OwnDrive => QuarkFile {
+                            fid: e.fid,
+                            share_fid_token: String::new(),
+                            pwd_id: String::new(),
+                            stoken: String::new(),
+                            name: e.name,
+                            rel_path: rel.clone(),
+                            size: e.size,
+                            own_drive: true,
+                        },
                     });
                 }
             }
@@ -310,14 +420,20 @@ impl QuarkDownloader {
     }
 
     /// Step 3: resolve the time-limited direct download URL for one file.
+    /// Own-drive files authenticate by cookie and take only `fids`; shared files
+    /// additionally need `fids_token` + `pwd_id` + `stoken`.
     async fn get_download_url(&self, f: &QuarkFile, cookie: &str) -> Result<String> {
         let url = format!("{API}/file/download?entry=ft&fr=pc&pr=ucpro");
-        let body = serde_json::json!({
-            "fids": [f.fid],
-            "fids_token": [f.share_fid_token],
-            "pwd_id": f.pwd_id,
-            "stoken": f.stoken,
-        });
+        let body = if f.own_drive {
+            serde_json::json!({ "fids": [f.fid] })
+        } else {
+            serde_json::json!({
+                "fids": [f.fid],
+                "fids_token": [f.share_fid_token],
+                "pwd_id": f.pwd_id,
+                "stoken": f.stoken,
+            })
+        };
         let resp: serde_json::Value = self
             .client
             .post(&url)
@@ -569,6 +685,22 @@ mod tests {
         assert_eq!(
             QuarkDownloader::start_fid_from_url("https://pan.quark.cn/s/6959f1e185ac#/list/all"),
             "0"
+        );
+        // own-drive deep link: "<fid>-<name>" segments
+        assert_eq!(
+            QuarkDownloader::start_fid_from_url(
+                "https://pan.quark.cn/list#/list/all/cc81c44987ef43ae8a021fae8ecbab1d-x/a51638ee954d44bbb196690662e7f9d0-AI%20film"
+            ),
+            "a51638ee954d44bbb196690662e7f9d0"
+        );
+    }
+
+    #[test]
+    fn own_drive_url_has_no_pwd_id() {
+        // own-drive URLs lack /s/ → treated as own drive
+        assert_eq!(
+            QuarkDownloader::pwd_id_from_url("https://pan.quark.cn/list#/list/all/abc-x"),
+            None
         );
     }
 

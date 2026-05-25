@@ -108,6 +108,21 @@ API 流程（share 頁）：
 
 改動檔：`platforms/quark/mod.rs`（`start_fid_from_url` + 遞迴起點）。實測：`…#/list/share/e4bba9a2…` → 只列該夾的 1 個 .rar（82.4MB），非整個 share。
 
+### A.11 自己網盤（own drive）支援
+
+原本只支援分享頁（`/s/<pwd_id>`）；使用者自己網盤的連結 `pan.quark.cn/list#/list/all/<fid>-<name>/…` 沒有 pwd_id → 解析失敗（「读取夸克分享失败」）。
+
+自己網盤走**不同 API**：
+- 列檔：`GET file/sort?pdir_fid=<fid>&_page&_size`（非 `share/sharepage/detail`）
+- 取直鏈：`POST file/download` body **只帶 `{fids:[fid]}`**（無 pwd_id/stoken/fids_token）
+- 直鏈 host 為 `dl-pc-zb.pds.quark.cn`（分享是 `dl-guest-…`）
+
+實作：`list_share_recursive` 改為**分流器** — 有 pwd_id(`/s/`)→ 分享 API；否則 → own-drive API。共用 DFS `list_recursive(ListSource::{Share{pwd_id,stoken}|OwnDrive}, …)`。`QuarkFile` 加 `own_drive: bool`（serde default），`get_download_url` 依此選 body。`start_fid_from_url` 升級支援 own-drive 的 `<fid>-<url-encoded-name>` 片段格式（取第一個 `-` 前的 32-hex）。`folder_name_from_url` 解出資料夾名當 title。
+
+改動檔：`platforms/quark/mod.rs`。實測：own-drive URL → 226 檔/3.4GB 正確列出 + 下載（own_drive=true，保留 M3/… 結構）。
+
+> 注意：自己網盤同樣受夸克 per-connection 限速；多連線分段加速一樣生效。
+
 ---
 
 ## B. omniget 編譯 / 打包指南
