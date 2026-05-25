@@ -20,6 +20,7 @@ pub enum ParsedContentType {
     Clip,
     Reel,
     Short,
+    Folder,
     Unknown,
 }
 
@@ -47,6 +48,7 @@ pub fn parse_url(url_str: &str) -> Option<ParsedUrl> {
             "douyin" => parse_douyin(&segments),
             "tencentvideo" => parse_tencent(&segments),
             "xiaohongshu" => parse_xiaohongshu(&segments),
+            "quark" => parse_quark(&segments),
             _ => (None, ParsedContentType::Unknown),
         },
     };
@@ -320,6 +322,14 @@ fn parse_tencent(segments: &[&str]) -> (Option<String>, ParsedContentType) {
         }
     }
     (None, ParsedContentType::Video)
+}
+
+fn parse_quark(segments: &[&str]) -> (Option<String>, ParsedContentType) {
+    // pan.quark.cn/s/<pwd_id> or /share/<pwd_id> → folder share
+    if matches!(segments.first(), Some(&"s") | Some(&"share")) {
+        return (segments.get(1).map(|s| s.to_string()), ParsedContentType::Folder);
+    }
+    (None, ParsedContentType::Folder)
 }
 
 fn parse_xiaohongshu(segments: &[&str]) -> (Option<String>, ParsedContentType) {

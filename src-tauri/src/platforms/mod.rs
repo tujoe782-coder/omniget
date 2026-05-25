@@ -18,6 +18,7 @@ pub mod generic_ytdlp;
 pub mod instagram;
 pub mod magnet;
 pub mod p2p;
+pub mod quark;
 #[cfg(not(target_os = "android"))]
 pub mod reddit;
 #[cfg(not(target_os = "android"))]

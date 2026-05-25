@@ -52,6 +52,11 @@ pub struct HttpFetcherConfig {
     pub steal_min_chunk_size: u64,
     pub use_sidecar_resume: bool,
     pub resume_save_interval: Duration,
+    /// When set, skip the HEAD probe and use this size (assumes Range support).
+    /// Used when the caller already knows the exact size (e.g. Quark listing),
+    /// avoiding cases where `reqwest` can't read Content-Length (compressed
+    /// transfer negotiation) and would otherwise fall back to single-stream.
+    pub known_total_bytes: Option<u64>,
 }
 
 impl Default for HttpFetcherConfig {
@@ -67,6 +72,7 @@ impl Default for HttpFetcherConfig {
             steal_min_chunk_size: DEFAULT_STEAL_MIN_CHUNK_SIZE,
             use_sidecar_resume: true,
             resume_save_interval: Duration::from_secs(DEFAULT_RESUME_SAVE_INTERVAL_SECS),
+            known_total_bytes: None,
         }
     }
 }
@@ -199,7 +205,13 @@ impl HttpFetcher {
         &self,
         progress_tx: mpsc::Sender<f64>,
     ) -> anyhow::Result<HttpFetcherResult> {
-        let probe = self.probe().await?;
+        let probe = match self.config.known_total_bytes {
+            Some(t) if t > 0 => ProbeResult {
+                content_length: Some(t),
+                accept_ranges: true,
+            },
+            _ => self.probe().await?,
+        };
 
         let part_path = part_path_for(&self.output_path);
         if let Some(parent) = self.output_path.parent() {

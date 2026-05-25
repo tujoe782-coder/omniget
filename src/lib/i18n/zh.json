@@ -540,6 +540,10 @@
     "formats_playlist_note": "单视频格式选择器不适用于播放列表。上方的「质量」选项将应用于每个视频。",
     "referer_label": "Referer（可选）",
     "referer_placeholder": "https://example.com",
+    "bilibili_range_label": "批量下载分 P",
+    "bilibili_range_placeholder": "结束 P，例如 66",
+    "bilibili_range_hint": "留空则只下载当前分 P；填入数字则从 P{{start}} 下载到该分 P。",
+    "bilibili_range_invalid": "结束 P 必须是大于 {{start}} 的整数。",
     "external_url_ready": "已从 Chrome 扩展收到 URL",
     "content_type": {
       "video": "视频",
@@ -551,7 +555,8 @@
       "short": "短视频",
       "playlist": "播放列表",
       "course": "课程",
-      "unknown": "媒体"
+      "unknown": "媒体",
+      "folder": "文件夹"
     },
     "fmt_type": "类型",
     "fmt_quality": "画质",
@@ -584,6 +589,14 @@
       "template_saved": "模板已保存",
       "template_delete": "删除模板",
       "template_flags": "flags"
+    },
+    "quark": {
+      "download_all": "下载全部",
+      "note": "通过你浏览器的登录状态访问夸克，并递归下载整个分享文件夹。",
+      "queued": "已从「{{title}}」加入 {{count}} 个文件到下载队列",
+      "empty": "这个分享没有可下载的文件",
+      "not_logged_in": "尚未登录夸克 — 请先在浏览器打开 pan.quark.cn 并登录",
+      "list_failed": "读取夸克分享失败（可能已失效或需要密码）"
     }
   },
   "about": {

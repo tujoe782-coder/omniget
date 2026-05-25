@@ -21,6 +21,7 @@ export const PLATFORM_DISPLAY_NAMES: Record<string, string> = {
   udemy: "Udemy",
   magnet: "BitTorrent",
   p2p: "P2P",
+  quark: "Quark (夸克网盘)",
 };
 
 export function platformDisplayName(s: string): string {

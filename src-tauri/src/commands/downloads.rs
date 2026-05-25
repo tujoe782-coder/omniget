@@ -21,6 +21,33 @@ pub struct PlatformInfo {
     pub content_type: Option<String>,
 }
 
+/// 產生「單調遞增且唯一」的 download_id。
+///
+/// 以毫秒時間戳為基底，但用 atomic 保證唯一：同一毫秒內的並發呼叫
+/// （例如 Bilibili 分 P 批次下載一次送出 N 個）會自動 +1，避免拿到
+/// 相同 id 導致 queue 撞號互相覆蓋（只有 1~2 個下載活下來）。
+pub(crate) fn next_download_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let mut prev = LAST_DOWNLOAD_ID.load(Ordering::Relaxed);
+    loop {
+        let next = if now_ms > prev { now_ms } else { prev + 1 };
+        match LAST_DOWNLOAD_ID.compare_exchange_weak(
+            prev,
+            next,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break next,
+            Err(actual) => prev = actual,
+        }
+    }
+}
+
 #[tauri::command]
 pub fn check_cookie_error() -> bool {
     let has_error = crate::core::ytdlp::has_cookie_error();
@@ -170,10 +197,7 @@ pub async fn download_from_url(
         ));
     }
 
-    let download_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let download_id = next_download_id();
 
     let download_queue = state.download_queue.clone();
 
@@ -295,10 +319,7 @@ pub async fn download_with_custom_args(
         ));
     }
 
-    let download_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let download_id = next_download_id();
 
     let download_queue = state.download_queue.clone();
     {

@@ -81,6 +81,11 @@ impl Platform {
             return Some(Platform::Other("magnet".to_string()));
         }
 
+        // Internal per-file scheme emitted by the Quark folder enqueue path.
+        if url_str.starts_with("quark://") {
+            return Some(Platform::Other("quark".to_string()));
+        }
+
         let parsed = url::Url::parse(url_str).ok()?;
         let host = parsed.host_str()?.to_lowercase();
 
@@ -133,6 +138,8 @@ impl Platform {
             Some(Platform::Other("thinkific".to_string()))
         } else if matches("rocketseat.com.br") {
             Some(Platform::Other("rocketseat".to_string()))
+        } else if matches("quark.cn") {
+            Some(Platform::Other("quark".to_string()))
         } else if matches("douyin.com") || matches("iesdouyin.com") {
             Some(Platform::Other("douyin".to_string()))
         } else if matches("kuaishou.com") {

@@ -18,4 +18,6 @@ pub mod yt_templates;
 #[cfg(not(target_os = "android"))]
 pub mod dependencies;
 #[cfg(not(target_os = "android"))]
+pub mod quark;
+#[cfg(not(target_os = "android"))]
 pub mod search;

@@ -89,6 +89,25 @@
   let formatError = $state<string | null>(null);
   let formatFetchGeneration = $state(0);
   let referer = $state("");
+  let bilibiliEndPart = $state("");
+
+  // Bilibili 分 P 批次下載：判斷目前偵測到的是否為 B 站單支影片
+  let isBilibiliVideo = $derived(
+    omniState.kind === "detected" &&
+    omniState.info.platform === "bilibili" &&
+    omniState.info.content_type === "video"
+  );
+  // 從目前輸入的 URL 解析起始分 P（無 ?p= 參數時視為 1）
+  let bilibiliStartPart = $derived.by(() => {
+    if (!isBilibiliVideo) return 1;
+    try {
+      const raw = new URL(url.trim()).searchParams.get("p");
+      const n = parseInt(raw ?? "1", 10);
+      return Number.isFinite(n) && n > 0 ? n : 1;
+    } catch {
+      return 1;
+    }
+  });
 
   type CookieAccount = {
     slug: string;
@@ -325,6 +344,7 @@
     formatError = null;
     formatFetchGeneration++;
     referer = "";
+    bilibiliEndPart = "";
 
     const trimmed = url.trim();
     if (!trimmed) {
@@ -365,8 +385,11 @@
       const result = await invoke<PlatformInfo>("detect_platform", { url: value });
       if (result.supported) {
         omniState = { kind: "detected", info: result };
-        invoke("prefetch_media_info", { url: value }).catch(() => {});
-        loadCookieAccounts(value);
+        // Quark resolves its file list on action (no single-media prefetch).
+        if (result.platform !== "quark") {
+          invoke("prefetch_media_info", { url: value }).catch(() => {});
+          loadCookieAccounts(value);
+        }
       } else {
         omniState = { kind: "unsupported" };
       }
@@ -524,6 +547,96 @@
 
     const currentUrl = url.trim();
     const platform = info.platform;
+
+    // 夸克网盘：遞迴列出整個分享資料夾 → 每檔入列下載
+    if (platform === "quark") {
+      omniState = { kind: "preparing", platform };
+      try {
+        const listing = await invoke<{
+          title: string;
+          total_files: number;
+          total_bytes: number;
+          files: unknown[];
+        }>("quark_list_share", { url: currentUrl });
+
+        if (!listing.files || listing.files.length === 0) {
+          omniState = { kind: "error", message: $t("omnibox.quark.empty"), originalUrl: currentUrl, platform };
+          return;
+        }
+
+        await invoke("quark_enqueue_files", { files: listing.files, outputDir });
+        showToast("info", $t("omnibox.quark.queued", { count: listing.total_files, title: listing.title }));
+        persistLastDownloadOptions();
+        url = "";
+        omniState = { kind: "idle" };
+      } catch (e: any) {
+        const raw = typeof e === "string" ? e : e?.message ?? "";
+        let msg: string;
+        if (raw.startsWith("QuarkCookie|")) msg = $t("omnibox.quark.not_logged_in");
+        else if (raw.startsWith("QuarkList|")) msg = $t("omnibox.quark.list_failed");
+        else msg = raw || $t("omnibox.error");
+        omniState = { kind: "error", message: msg, originalUrl: currentUrl, platform };
+      }
+      return;
+    }
+
+    // Bilibili 分 P 批次下載：輸入框有填數字時，從起始 p 一路下載到指定的 p
+    const rangeInput = bilibiliEndPart.trim();
+    if (isBilibiliVideo && rangeInput !== "") {
+      const startP = bilibiliStartPart;
+      const endP = Number(rangeInput);
+      if (!Number.isInteger(endP) || endP <= startP) {
+        showToast("error", $t("omnibox.bilibili_range_invalid", { start: startP }));
+        return;
+      }
+      const rangeUrls: string[] = [];
+      for (let p = startP; p <= endP; p++) {
+        try {
+          const u = new URL(currentUrl);
+          u.searchParams.set("p", String(p));
+          rangeUrls.push(u.toString());
+        } catch {
+          // 已是驗證過的 bilibili URL，理論上不會解析失敗
+        }
+      }
+      if (rangeUrls.length === 0) {
+        showToast("error", $t("omnibox.bilibili_range_invalid", { start: startP }));
+        return;
+      }
+
+      omniState = { kind: "preparing", platform };
+      url = "";
+      bilibiliEndPart = "";
+
+      const results = await Promise.allSettled(
+        rangeUrls.map(u => invoke<DownloadStarted>("download_from_url", {
+          url: u,
+          outputDir,
+          downloadMode: downloadMode === "auto" ? null : downloadMode,
+          quality: selectedQuality,
+          formatId: null,
+          referer: null,
+          cookieSlug: selectedCookieSlug,
+        }))
+      );
+
+      const queued = results.filter(r => r.status === "fulfilled").length;
+      if (queued > 0) {
+        showToast("info", $t("omnibox.batch_queued", { count: queued }));
+        persistLastDownloadOptions();
+        omniState = { kind: "idle" };
+      } else {
+        const rejected = results.find(r => r.status === "rejected") as
+          | PromiseRejectedResult
+          | undefined;
+        const reason = rejected?.reason;
+        const msg =
+          typeof reason === "string" ? reason : reason?.message ?? $t("omnibox.error");
+        omniState = { kind: "error", message: msg, originalUrl: currentUrl, platform };
+      }
+      return;
+    }
+
     omniState = { kind: "preparing", platform };
     url = "";
 
@@ -792,7 +905,37 @@
         <button class="button action-btn" onclick={handleAction}>
           {$t('omnibox.go_to_hotmart')}
         </button>
+      {:else if omniState.info.platform === "quark"}
+        <button class="download-primary-btn" onclick={handleAction}>
+          {$t('omnibox.quark.download_all')}
+        </button>
+        <p class="quark-note">{$t('omnibox.quark.note')}</p>
       {:else}
+        {#if isBilibiliVideo}
+          <div class="bili-range-wrapper">
+            <label class="bili-range-label" for="bili-range-input">
+              {$t('omnibox.bilibili_range_label')}
+            </label>
+            <input
+              id="bili-range-input"
+              class="bili-range-input"
+              type="text"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              placeholder={$t('omnibox.bilibili_range_placeholder')}
+              value={bilibiliEndPart}
+              oninput={(e) => {
+                const cleaned = e.currentTarget.value.replace(/[^0-9]/g, "");
+                bilibiliEndPart = cleaned;
+                e.currentTarget.value = cleaned;
+              }}
+            />
+            <span class="bili-range-hint">
+              {$t('omnibox.bilibili_range_hint', { start: bilibiliStartPart })}
+            </span>
+          </div>
+        {/if}
+
         <button class="download-primary-btn" onclick={handleAction}>
           {$t('omnibox.download')}
         </button>
@@ -1249,6 +1392,52 @@
   .referer-input:focus-visible {
     border-color: var(--secondary);
     outline: none;
+  }
+
+  .bili-range-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    max-width: 300px;
+  }
+
+  .bili-range-label {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--gray);
+  }
+
+  .bili-range-input {
+    padding: 6px var(--padding);
+    font-size: 13px;
+    background: var(--button);
+    border: 1px solid var(--input-border);
+    border-radius: calc(var(--border-radius) - 2px);
+    color: var(--secondary);
+  }
+
+  .bili-range-input::placeholder {
+    color: var(--gray);
+  }
+
+  .bili-range-input:focus-visible {
+    border-color: var(--secondary);
+    outline: none;
+  }
+
+  .bili-range-hint {
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--gray);
+  }
+
+  .quark-note {
+    margin: calc(var(--padding) / 2) 0 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--gray);
+    text-align: center;
   }
 
   .action-btn {

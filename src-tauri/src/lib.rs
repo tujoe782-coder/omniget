@@ -31,6 +31,7 @@ pub struct AppState {
     pub active_generic_downloads:
         Arc<tokio::sync::Mutex<HashMap<u64, (String, CancellationToken)>>>,
     pub registry: core::registry::PlatformRegistry,
+    pub quark_pending: platforms::quark::QuarkPending,
     pub download_queue: Arc<tokio::sync::Mutex<core::queue::DownloadQueue>>,
     pub torrent_session: Arc<tokio::sync::Mutex<Option<Arc<librqbit::Session>>>>,
     pub active_p2p_sends: ActiveP2pSends,
@@ -60,6 +61,11 @@ pub fn run() {
         torrent_session.clone(),
     )));
     registry.register(Arc::new(platforms::p2p::P2pDownloader::new()));
+    let quark_pending: platforms::quark::QuarkPending =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    registry.register(Arc::new(platforms::quark::QuarkDownloader::new(
+        quark_pending.clone(),
+    )));
     registry.register(Arc::new(
         platforms::generic_ytdlp::GenericYtdlpDownloader::new(),
     ));
@@ -68,6 +74,7 @@ pub fn run() {
         active_downloads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         active_generic_downloads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         registry,
+        quark_pending,
         download_queue: Arc::new(tokio::sync::Mutex::new(core::queue::DownloadQueue::new(2))),
         torrent_session,
         active_p2p_sends: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -431,6 +438,8 @@ pub fn run() {
             commands::downloads::get_media_formats,
             commands::downloads::prefetch_media_info,
             commands::downloads::download_from_url,
+            commands::quark::quark_list_share,
+            commands::quark::quark_enqueue_files,
             commands::downloads::download_with_custom_args,
             commands::downloads::cancel_generic_download,
             commands::yt_templates::yt_templates_list,

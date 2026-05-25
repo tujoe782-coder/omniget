@@ -540,6 +540,10 @@
     "formats_playlist_note": "Le sélecteur de format par vidéo ne s'applique pas aux playlists. L'option Qualité ci-dessus s'applique à chaque vidéo.",
     "referer_label": "Referer (optionnel)",
     "referer_placeholder": "https://example.com",
+    "bilibili_range_label": "Batch download parts (P)",
+    "bilibili_range_placeholder": "End part, e.g. 66",
+    "bilibili_range_hint": "Leave empty to download this part only. Enter a number to download from P{{start}} up to it.",
+    "bilibili_range_invalid": "End part must be a whole number greater than {{start}}.",
     "external_url_ready": "URL reçue depuis l'extension Chrome",
     "content_type": {
       "video": "Vidéo",
@@ -551,7 +555,8 @@
       "short": "Short",
       "playlist": "Playlist",
       "course": "Cours",
-      "unknown": "Média"
+      "unknown": "Média",
+      "folder": "Folder"
     },
     "fmt_type": "Type",
     "fmt_quality": "Qualite",
@@ -584,6 +589,14 @@
       "template_saved": "Modèle enregistré",
       "template_delete": "Supprimer le modèle",
       "template_flags": "flags"
+    },
+    "quark": {
+      "download_all": "Download all",
+      "note": "Logs into Quark via your browser session and recursively downloads the whole shared folder.",
+      "queued": "Queued {{count}} file(s) from \"{{title}}\"",
+      "empty": "This share has no downloadable files",
+      "not_logged_in": "Not logged in to Quark — open pan.quark.cn in your browser and log in first",
+      "list_failed": "Failed to read the Quark share (it may be expired or require a password)"
     }
   },
   "about": {
