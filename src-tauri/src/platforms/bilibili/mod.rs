@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -39,11 +40,46 @@ impl BilibiliDownloader {
         false
     }
 
-    fn bilibili_extra_flags() -> Vec<String> {
-        vec![
+    /// `--impersonate chrome` makes yt-dlp reuse a real browser's TLS/JA3
+    /// fingerprint via curl_cffi, which lowers Bilibili's gaia risk-control
+    /// (HTTP 412) friction. Added only when the resolved binary actually
+    /// bundles curl_cffi — passing it otherwise is a hard error that breaks
+    /// the whole download. NOTE: the decisive 412 unblock for gated content is
+    /// login cookies (Settings → Cookies / Advanced → Cookies from browser);
+    /// impersonate is belt-and-suspenders on top of cookies, not a substitute.
+    async fn impersonate_flags(ytdlp_path: &Path) -> Vec<String> {
+        if ytdlp::supports_impersonate(ytdlp_path).await {
+            vec!["--impersonate".to_string(), "chrome".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Flags for the metadata (info) fetch: referer + impersonate.
+    async fn bilibili_info_flags(ytdlp_path: &Path) -> Vec<String> {
+        let mut flags = vec![
             "--referer".to_string(),
             "https://www.bilibili.com".to_string(),
-        ]
+        ];
+        flags.extend(Self::impersonate_flags(ytdlp_path).await);
+        flags
+    }
+
+    /// Flags for the actual download: single-video + H.264 preference +
+    /// impersonate. Referer is supplied separately via the `referer` arg of
+    /// `ytdlp::download_video`, so it is not repeated here.
+    ///
+    /// Bilibili's higher resolutions are frequently AV1/HEVC only, which some
+    /// players (QuickTime) can't decode; `--format-sort vcodec:h264` prefers
+    /// H.264 and silently falls back when a resolution has no H.264 variant.
+    async fn bilibili_download_flags(ytdlp_path: &Path) -> Vec<String> {
+        let mut flags = vec![
+            "--no-playlist".to_string(),
+            "--format-sort".to_string(),
+            "vcodec:h264".to_string(),
+        ];
+        flags.extend(Self::impersonate_flags(ytdlp_path).await);
+        flags
     }
 }
 
@@ -70,7 +106,7 @@ impl PlatformDownloader for BilibiliDownloader {
             .await
             .ok_or_else(|| anyhow!("yt-dlp not found"))?;
 
-        let extra = Self::bilibili_extra_flags();
+        let extra = Self::bilibili_info_flags(&ytdlp_path).await;
 
         if Self::is_playlist_or_series(url) {
             let (title, entries) = ytdlp::get_playlist_info(&ytdlp_path, url, &extra).await?;
@@ -231,7 +267,7 @@ impl PlatformDownloader for BilibiliDownloader {
             .as_ref()
             .and_then(|q| q.trim_end_matches('p').parse::<u32>().ok());
 
-        let extra = vec!["--no-playlist".to_string()];
+        let extra = Self::bilibili_download_flags(&ytdlp_path).await;
 
         ytdlp::download_video(
             &ytdlp_path,
@@ -269,6 +305,7 @@ impl BilibiliDownloader {
             duration_seconds: 0.0,
             torrent_id: None,
         };
+        let extra = Self::bilibili_download_flags(ytdlp_path).await;
 
         for (i, quality) in info.available_qualities.iter().enumerate() {
             if opts.cancel_token.is_cancelled() {
@@ -286,8 +323,6 @@ impl BilibiliDownloader {
                     let _ = progress_clone.send(overall).await;
                 }
             });
-
-            let extra = vec!["--no-playlist".to_string()];
 
             match ytdlp::download_video(
                 ytdlp_path,

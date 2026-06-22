@@ -231,6 +231,7 @@ static YTDLP_PATH_CACHE: std::sync::RwLock<Option<Option<PathBuf>>> = std::sync:
 static FFMPEG_LOCATION_CACHE: std::sync::RwLock<Option<Option<String>>> =
     std::sync::RwLock::new(None);
 static JS_RUNTIME_CACHE: std::sync::RwLock<Option<Option<String>>> = std::sync::RwLock::new(None);
+static IMPERSONATE_SUPPORT_CACHE: std::sync::RwLock<Option<bool>> = std::sync::RwLock::new(None);
 static RATE_LIMIT_429_COUNT: AtomicU64 = AtomicU64::new(0);
 static RATE_LIMIT_429_LAST_TS: AtomicU64 = AtomicU64::new(0);
 static COOKIE_ERROR_FLAG: AtomicBool = AtomicBool::new(false);
@@ -271,6 +272,9 @@ fn rate_limit_429_increment() {
 
 pub fn reset_ytdlp_cache() {
     if let Ok(mut cache) = YTDLP_PATH_CACHE.write() {
+        *cache = None;
+    }
+    if let Ok(mut cache) = IMPERSONATE_SUPPORT_CACHE.write() {
         *cache = None;
     }
 }
@@ -368,6 +372,19 @@ fn yt_rate_limiter() -> &'static YtRateLimiter {
         semaphore: tokio::sync::Semaphore::new(3),
         last_request_ns: AtomicU64::new(0),
     })
+}
+
+/// Caps how many Bilibili *downloads* run at once. Unlike `YtRateLimiter`
+/// (which only spaces request *starts*), this permit is held for the whole
+/// download. Bilibili's per-IP gaia risk-control throttles transfers to zero
+/// when too many streams download concurrently — the symptom is downloads
+/// freezing mid-stream with the TCP connection still open. Queuing the rest
+/// behind a small semaphore keeps a bulk "download all parts" request from
+/// self-throttling; queued items simply wait for a slot instead of failing.
+static BILI_DOWNLOAD_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+fn bili_download_semaphore() -> &'static tokio::sync::Semaphore {
+    BILI_DOWNLOAD_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(3))
 }
 
 const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -849,9 +866,45 @@ fn js_runtime_args() -> Vec<String> {
     }
 }
 
+/// Whether the resolved yt-dlp binary bundles curl_cffi and therefore supports
+/// `--impersonate`. The official `yt-dlp_macos` / `yt-dlp.exe` /
+/// `yt-dlp` / `yt-dlp_linux_aarch64` release binaries bundle it, but some
+/// distro-packaged `yt-dlp` builds (the system-PATH fallback) do not. Passing
+/// `--impersonate` to a binary without curl_cffi is a hard error that would
+/// break the whole download, so callers MUST gate on this. Result is cached
+/// (invalidated by `reset_ytdlp_cache`, e.g. after an update).
+pub async fn supports_impersonate(ytdlp: &Path) -> bool {
+    if let Ok(cache) = IMPERSONATE_SUPPORT_CACHE.read() {
+        if let Some(v) = *cache {
+            return v;
+        }
+    }
+    let ytdlp = ytdlp.to_path_buf();
+    let supported = tokio::task::spawn_blocking(move || {
+        crate::core::process::std_command(&ytdlp)
+            .arg("--list-impersonate-targets")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("curl_cffi"))
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if let Ok(mut cache) = IMPERSONATE_SUPPORT_CACHE.write() {
+        *cache = Some(supported);
+    }
+    supported
+}
+
 fn is_youtube_url(url: &str) -> bool {
     let lower = url.to_lowercase();
     lower.contains("youtube.com") || lower.contains("youtu.be")
+}
+
+fn is_bilibili_url(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains("bilibili.com") || lower.contains("bilibili.tv") || lower.contains("b23.tv")
 }
 
 /// Extracts the most meaningful error line from yt-dlp stderr output.
@@ -885,7 +938,7 @@ pub async fn get_video_info(
 ) -> anyhow::Result<serde_json::Value> {
     let _timer_start = std::time::Instant::now();
 
-    if is_youtube_url(url) {
+    if is_youtube_url(url) || is_bilibili_url(url) {
         yt_rate_limiter().acquire().await;
     }
 
@@ -1070,7 +1123,7 @@ pub async fn get_playlist_info(
     url: &str,
     extra_flags: &[String],
 ) -> anyhow::Result<(String, Vec<PlaylistEntry>)> {
-    if is_youtube_url(url) {
+    if is_youtube_url(url) || is_bilibili_url(url) {
         yt_rate_limiter().acquire().await;
     }
 
@@ -1249,7 +1302,21 @@ pub async fn download_video(
 ) -> anyhow::Result<DownloadResult> {
     let _timer_start = std::time::Instant::now();
 
-    if is_youtube_url(url) {
+    // Hold a Bilibili download slot for this whole function so a bulk
+    // "download all parts" request cannot open enough concurrent streams to
+    // trip Bilibili's per-IP throttle (which freezes transfers mid-download).
+    let _bili_permit = if is_bilibili_url(url) {
+        Some(
+            bili_download_semaphore()
+                .acquire()
+                .await
+                .expect("bili download semaphore closed"),
+        )
+    } else {
+        None
+    };
+
+    if is_youtube_url(url) || is_bilibili_url(url) {
         yt_rate_limiter().acquire().await;
     }
 
@@ -1489,6 +1556,10 @@ pub async fn download_video(
             8
         };
         concurrent_fragments.min(max_frags)
+    } else if is_bilibili_url(url) {
+        // Bilibili CDN throttles many parallel connections per IP; keep the
+        // per-download connection count low.
+        concurrent_fragments.min(2)
     } else {
         concurrent_fragments
     };
@@ -2094,6 +2165,11 @@ fn translate_ytdlp_error(stderr: &str) -> anyhow::Error {
     }
     if lower.contains("http error 403") || lower.contains("forbidden") {
         return anyhow!("Access denied (403). The video may be private or region-restricted.");
+    }
+    if lower.contains("412") && lower.contains("precondition") {
+        return anyhow!(
+            "Site anti-crawl blocked the request (HTTP 412). This usually means login cookies are required (common for Bilibili). Import this site's cookies in Settings → Cookies, or set Advanced → \"Cookies from browser\" to the browser where you are logged in (e.g. chrome, edge, firefox), then retry."
+        );
     }
     if lower.contains("sign in to confirm")
         || lower.contains("login required")
